@@ -23,7 +23,12 @@
   "dependencies": {
     "@vue-flow/core": "^1.45.0",
     "vue": "^3.5.18",
-    "pinia": "^2.2.6"
+    "vue-router": "^4.4.5",
+    "pinia": "^2.3.1",
+    "pinia-plugin-persistedstate": "^3.2.3",
+    "axios": "^1.7.7",
+    "zod": "^3.23.8",
+    "date-fns": "^4.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

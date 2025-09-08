@@ -1,306 +1,443 @@
 import { defineStore } from 'pinia'
 import { ref, computed, readonly } from 'vue'
-import type {
-  WorkflowNode,
-  WorkflowEdge,
-  Workflow,
-  ExecutionStatus,
-  HistoryRecord,
-  UndoRedoStack,
-  ViewportState,
-  SelectionState,
-} from '@/types'
+import { MockAPI } from '@/mock/api'
+import type { MockWorkflow } from '@/mock/data'
 
-export const useWorkflowStore = defineStore('workflow', () => {
+export const useWorkflowManagementStore = defineStore('workflowManagement', () => {
   // ===== 状态定义 =====
-  const nodes = ref<WorkflowNode[]>([])
-  const edges = ref<WorkflowEdge[]>([])
-  const selectedElements = ref<SelectionState>({ nodes: [], edges: [] })
-  const viewport = ref<ViewportState>({ x: 0, y: 0, zoom: 1 })
-  const executionStatus = ref<ExecutionStatus>('idle')
-  const currentWorkflow = ref<Workflow | null>(null)
-
-  // 历史记录管理
-  const history = ref<UndoRedoStack>({
-    past: [],
-    present: {
-      id: '',
-      action: 'add',
-      timestamp: new Date(),
-      data: { nodes: [], edges: [], viewport: { x: 0, y: 0, zoom: 1 } },
-    },
-    future: [],
+  const workflows = ref<MockWorkflow[]>([])
+  const currentWorkflow = ref<MockWorkflow | null>(null)
+  const isLoading = ref(false)
+  const error = ref<string | null>(null)
+  
+  // 分页状态
+  const pagination = ref({
+    page: 1,
+    limit: 10,
+    total: 0,
+    totalPages: 0
+  })
+  
+  // 筛选状态
+  const filters = ref({
+    search: '',
+    status: '',
+    creator: '',
+    sortBy: 'updatedAt',
+    sortOrder: 'desc' as 'asc' | 'desc'
   })
 
   // ===== 计算属性 =====
-  const selectedNodes = computed(() =>
-    nodes.value.filter(node => selectedElements.value.nodes.includes(node.id))
+  const activeWorkflows = computed(() => 
+    workflows.value.filter(w => w.status === 'active')
   )
 
-  const selectedEdges = computed(() =>
-    edges.value.filter(edge => selectedElements.value.edges.includes(edge.id))
+  const runningWorkflows = computed(() => 
+    workflows.value.filter(w => w.status === 'running')
   )
 
-  const workflowIsValid = computed(
-    () => nodes.value.length > 0 && nodes.value.some(node => node.type === 'input')
+  const errorWorkflows = computed(() => 
+    workflows.value.filter(w => w.status === 'error')
   )
 
-  const canUndo = computed(() => history.value.past.length > 0)
-  const canRedo = computed(() => history.value.future.length > 0)
+  const totalExecutions = computed(() => 
+    workflows.value.reduce((sum, w) => sum + w.executionCount, 0)
+  )
 
-  const workflowStats = computed(() => ({
-    nodeCount: nodes.value.length,
-    edgeCount: edges.value.length,
-    selectedCount: selectedElements.value.nodes.length + selectedElements.value.edges.length,
-  }))
+  const averageSuccessRate = computed(() => {
+    if (workflows.value.length === 0) return 0
+    const totalRate = workflows.value.reduce((sum, w) => sum + w.successRate, 0)
+    return Math.round(totalRate / workflows.value.length * 100) / 100
+  })
+
+  const workflowsByStatus = computed(() => {
+    const statusCount = {
+      active: 0,
+      inactive: 0,
+      running: 0,
+      error: 0
+    }
+    
+    workflows.value.forEach(w => {
+      statusCount[w.status]++
+    })
+    
+    return statusCount
+  })
 
   // ===== Actions =====
 
-  // 节点操作
-  const addNode = (node: WorkflowNode) => {
-    saveToHistory('add')
-    nodes.value.push(node)
-  }
+  /**
+   * 获取工作流列表
+   */
+  const fetchWorkflows = async (params?: {
+    page?: number
+    limit?: number
+    search?: string
+    status?: string
+    creator?: string
+  }) => {
+    isLoading.value = true
+    error.value = null
 
-  const addNodes = (newNodes: WorkflowNode[]) => {
-    saveToHistory('add')
-    nodes.value.push(...newNodes)
-  }
-
-  const removeNode = (nodeId: string) => {
-    saveToHistory('delete')
-    nodes.value = nodes.value.filter(node => node.id !== nodeId)
-    edges.value = edges.value.filter(edge => edge.source !== nodeId && edge.target !== nodeId)
-    selectedElements.value.nodes = selectedElements.value.nodes.filter(id => id !== nodeId)
-  }
-
-  const updateNode = (nodeId: string, updates: Partial<WorkflowNode>) => {
-    saveToHistory('update')
-    const nodeIndex = nodes.value.findIndex(node => node.id === nodeId)
-    if (nodeIndex !== -1) {
-      nodes.value[nodeIndex] = { ...nodes.value[nodeIndex], ...updates }
-    }
-  }
-
-  const updateNodeData = (nodeId: string, data: Partial<WorkflowNode['data']>) => {
-    const nodeIndex = nodes.value.findIndex(node => node.id === nodeId)
-    if (nodeIndex !== -1) {
-      nodes.value[nodeIndex].data = { ...nodes.value[nodeIndex].data, ...data }
-    }
-  }
-
-  // 连线操作
-  const addEdge = (edge: WorkflowEdge) => {
-    saveToHistory('add')
-    edges.value.push(edge)
-  }
-
-  const addEdges = (newEdges: WorkflowEdge[]) => {
-    saveToHistory('add')
-    edges.value.push(...newEdges)
-  }
-
-  const removeEdge = (edgeId: string) => {
-    saveToHistory('delete')
-    edges.value = edges.value.filter(edge => edge.id !== edgeId)
-    selectedElements.value.edges = selectedElements.value.edges.filter(id => id !== edgeId)
-  }
-
-  const updateEdge = (edgeId: string, updates: Partial<WorkflowEdge>) => {
-    saveToHistory('update')
-    const edgeIndex = edges.value.findIndex(edge => edge.id === edgeId)
-    if (edgeIndex !== -1) {
-      edges.value[edgeIndex] = { ...edges.value[edgeIndex], ...updates }
-    }
-  }
-
-  // 选择操作
-  const selectNode = (nodeId: string, multi = false) => {
-    if (multi) {
-      if (!selectedElements.value.nodes.includes(nodeId)) {
-        selectedElements.value.nodes.push(nodeId)
+    try {
+      const response = await MockAPI.Workflow.getWorkflows({
+        ...filters.value,
+        ...params
+      })
+      
+      workflows.value = response.data
+      pagination.value = {
+        page: response.page,
+        limit: response.limit,
+        total: response.total,
+        totalPages: response.totalPages
       }
-    } else {
-      selectedElements.value.nodes = [nodeId]
-      selectedElements.value.edges = []
+    } catch (err: any) {
+      error.value = err.message
+      throw err
+    } finally {
+      isLoading.value = false
     }
   }
 
-  const selectEdge = (edgeId: string, multi = false) => {
-    if (multi) {
-      if (!selectedElements.value.edges.includes(edgeId)) {
-        selectedElements.value.edges.push(edgeId)
+  /**
+   * 获取工作流详情
+   */
+  const fetchWorkflow = async (id: string) => {
+    isLoading.value = true
+    error.value = null
+
+    try {
+      const workflow = await MockAPI.Workflow.getWorkflow(id)
+      currentWorkflow.value = workflow
+      return workflow
+    } catch (err: any) {
+      error.value = err.message
+      throw err
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  /**
+   * 创建工作流
+   */
+  const createWorkflow = async (workflowData: Partial<MockWorkflow>) => {
+    isLoading.value = true
+    error.value = null
+
+    try {
+      const newWorkflow = await MockAPI.Workflow.createWorkflow(workflowData)
+      workflows.value.unshift(newWorkflow)
+      return newWorkflow
+    } catch (err: any) {
+      error.value = err.message
+      throw err
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  /**
+   * 更新工作流
+   */
+  const updateWorkflow = async (id: string, workflowData: Partial<MockWorkflow>) => {
+    isLoading.value = true
+    error.value = null
+
+    try {
+      const updatedWorkflow = await MockAPI.Workflow.updateWorkflow(id, workflowData)
+      
+      // 更新列表中的工作流
+      const index = workflows.value.findIndex(w => w.id === id)
+      if (index > -1) {
+        workflows.value[index] = updatedWorkflow
       }
-    } else {
-      selectedElements.value.edges = [edgeId]
-      selectedElements.value.nodes = []
+      
+      // 更新当前工作流
+      if (currentWorkflow.value?.id === id) {
+        currentWorkflow.value = updatedWorkflow
+      }
+      
+      return updatedWorkflow
+    } catch (err: any) {
+      error.value = err.message
+      throw err
+    } finally {
+      isLoading.value = false
     }
   }
 
-  const clearSelection = () => {
-    selectedElements.value = { nodes: [], edges: [] }
-  }
+  /**
+   * 删除工作流
+   */
+  const deleteWorkflow = async (id: string) => {
+    isLoading.value = true
+    error.value = null
 
-  const selectAll = () => {
-    selectedElements.value = {
-      nodes: nodes.value.map(node => node.id),
-      edges: edges.value.map(edge => edge.id),
+    try {
+      await MockAPI.Workflow.deleteWorkflow(id)
+      
+      // 从列表中移除
+      const index = workflows.value.findIndex(w => w.id === id)
+      if (index > -1) {
+        workflows.value.splice(index, 1)
+      }
+      
+      // 清除当前工作流
+      if (currentWorkflow.value?.id === id) {
+        currentWorkflow.value = null
+      }
+    } catch (err: any) {
+      error.value = err.message
+      throw err
+    } finally {
+      isLoading.value = false
     }
   }
 
-  // 视口操作
-  const updateViewport = (newViewport: Partial<ViewportState>) => {
-    viewport.value = { ...viewport.value, ...newViewport }
+  /**
+   * 执行工作流
+   */
+  const executeWorkflow = async (id: string) => {
+    isLoading.value = true
+    error.value = null
+
+    try {
+      const result = await MockAPI.Workflow.executeWorkflow(id)
+      
+      // 更新工作流状态
+      const workflow = workflows.value.find(w => w.id === id)
+      if (workflow) {
+        workflow.status = 'running'
+        workflow.lastExecuted = new Date()
+        workflow.executionCount++
+      }
+      
+      return result
+    } catch (err: any) {
+      error.value = err.message
+      throw err
+    } finally {
+      isLoading.value = false
+    }
   }
 
-  // 历史记录操作
-  const saveToHistory = (action: HistoryRecord['action']) => {
-    const record: HistoryRecord = {
-      id: Date.now().toString(),
-      action,
-      timestamp: new Date(),
-      data: {
-        nodes: [...nodes.value],
-        edges: [...edges.value],
-        viewport: { ...viewport.value },
+  /**
+   * 停止工作流
+   */
+  const stopWorkflow = async (id: string) => {
+    isLoading.value = true
+    error.value = null
+
+    try {
+      // 模拟停止工作流
+      await new Promise(resolve => setTimeout(resolve, 1000))
+      
+      const workflow = workflows.value.find(w => w.id === id)
+      if (workflow) {
+        workflow.status = 'inactive'
+      }
+    } catch (err: any) {
+      error.value = err.message
+      throw err
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  /**
+   * 复制工作流
+   */
+  const duplicateWorkflow = async (id: string) => {
+    isLoading.value = true
+    error.value = null
+
+    try {
+      const originalWorkflow = await MockAPI.Workflow.getWorkflow(id)
+      const duplicatedWorkflow = await MockAPI.Workflow.createWorkflow({
+        ...originalWorkflow,
+        name: `${originalWorkflow.name} (副本)`,
+        status: 'inactive',
+        executionCount: 0,
+        successRate: 0,
+        lastExecuted: undefined
+      })
+      
+      workflows.value.unshift(duplicatedWorkflow)
+      return duplicatedWorkflow
+    } catch (err: any) {
+      error.value = err.message
+      throw err
+    } finally {
+      isLoading.value = false
+    }
+  }
+
+  /**
+   * 更新筛选条件
+   */
+  const updateFilters = (newFilters: Partial<typeof filters.value>) => {
+    filters.value = { ...filters.value, ...newFilters }
+  }
+
+  /**
+   * 重置筛选条件
+   */
+  const resetFilters = () => {
+    filters.value = {
+      search: '',
+      status: '',
+      creator: '',
+      sortBy: 'updatedAt',
+      sortOrder: 'desc'
+    }
+  }
+
+  /**
+   * 搜索工作流
+   */
+  const searchWorkflows = async (query: string) => {
+    updateFilters({ search: query })
+    await fetchWorkflows({ page: 1 })
+  }
+
+  /**
+   * 按状态筛选
+   */
+  const filterByStatus = async (status: string) => {
+    updateFilters({ status })
+    await fetchWorkflows({ page: 1 })
+  }
+
+  /**
+   * 按创建者筛选
+   */
+  const filterByCreator = async (creator: string) => {
+    updateFilters({ creator })
+    await fetchWorkflows({ page: 1 })
+  }
+
+  /**
+   * 排序工作流
+   */
+  const sortWorkflows = async (sortBy: string, sortOrder: 'asc' | 'desc') => {
+    updateFilters({ sortBy, sortOrder })
+    await fetchWorkflows()
+  }
+
+  /**
+   * 分页
+   */
+  const changePage = async (page: number) => {
+    await fetchWorkflows({ page })
+  }
+
+  /**
+   * 改变每页数量
+   */
+  const changePageSize = async (limit: number) => {
+    await fetchWorkflows({ page: 1, limit })
+  }
+
+  /**
+   * 获取工作流执行历史
+   */
+  const getExecutionHistory = async (workflowId: string) => {
+    // 模拟获取执行历史
+    await new Promise(resolve => setTimeout(resolve, 500))
+    
+    return [
+      {
+        id: '1',
+        workflowId,
+        status: 'success',
+        startTime: new Date(Date.now() - 3600000),
+        endTime: new Date(Date.now() - 3540000),
+        duration: 60000,
+        logs: ['开始执行', '处理数据', '执行完成']
       },
-    }
-
-    history.value.past.push(history.value.present)
-    history.value.present = record
-    history.value.future = []
-
-    // 限制历史记录数量
-    if (history.value.past.length > 50) {
-      history.value.past.shift()
-    }
+      {
+        id: '2',
+        workflowId,
+        status: 'failed',
+        startTime: new Date(Date.now() - 7200000),
+        endTime: new Date(Date.now() - 7140000),
+        duration: 60000,
+        error: '连接超时',
+        logs: ['开始执行', '处理数据', '连接失败']
+      }
+    ]
   }
 
-  const undo = () => {
-    if (canUndo.value) {
-      history.value.future.unshift(history.value.present)
-      const previousRecord = history.value.past.pop()!
-      history.value.present = previousRecord
-
-      // 恢复状态
-      if (previousRecord.data.nodes) {
-        nodes.value = [...previousRecord.data.nodes]
-      }
-      if (previousRecord.data.edges) {
-        edges.value = [...previousRecord.data.edges]
-      }
-      if (previousRecord.data.viewport) {
-        viewport.value = { ...previousRecord.data.viewport }
-      }
-    }
+  /**
+   * 清除错误
+   */
+  const clearError = () => {
+    error.value = null
   }
 
-  const redo = () => {
-    if (canRedo.value) {
-      history.value.past.push(history.value.present)
-      const nextRecord = history.value.future.shift()!
-      history.value.present = nextRecord
-
-      // 恢复状态
-      if (nextRecord.data.nodes) {
-        nodes.value = [...nextRecord.data.nodes]
-      }
-      if (nextRecord.data.edges) {
-        edges.value = [...nextRecord.data.edges]
-      }
-      if (nextRecord.data.viewport) {
-        viewport.value = { ...nextRecord.data.viewport }
-      }
-    }
-  }
-
-  // 工作流操作
-  const loadWorkflow = (workflow: Workflow) => {
-    currentWorkflow.value = workflow
-    nodes.value = [...workflow.nodes]
-    edges.value = [...workflow.edges]
-    clearSelection()
-    // 重置历史记录
-    history.value = {
-      past: [],
-      present: {
-        id: Date.now().toString(),
-        action: 'add',
-        timestamp: new Date(),
-        data: { nodes: [...workflow.nodes], edges: [...workflow.edges] },
-      },
-      future: [],
-    }
-  }
-
-  const clearWorkflow = () => {
-    nodes.value = []
-    edges.value = []
-    clearSelection()
+  /**
+   * 重置状态
+   */
+  const reset = () => {
+    workflows.value = []
     currentWorkflow.value = null
-    executionStatus.value = 'idle'
-    viewport.value = { x: 0, y: 0, zoom: 1 }
-  }
-
-  const exportWorkflow = (): Workflow => {
-    const workflow: Workflow = {
-      id: currentWorkflow.value?.id || Date.now().toString(),
-      name: currentWorkflow.value?.name || 'Untitled Workflow',
-      ...(currentWorkflow.value?.description && { description: currentWorkflow.value.description }),
-      nodes: [...nodes.value],
-      edges: [...edges.value],
-      version: '1.0.0',
-      createdAt: currentWorkflow.value?.createdAt || new Date(),
-      updatedAt: new Date(),
-      tags: currentWorkflow.value?.tags || [],
-      isPublic: currentWorkflow.value?.isPublic || false,
+    isLoading.value = false
+    error.value = null
+    pagination.value = {
+      page: 1,
+      limit: 10,
+      total: 0,
+      totalPages: 0
     }
-    return workflow
-  }
-
-  // 执行状态管理
-  const setExecutionStatus = (status: ExecutionStatus) => {
-    executionStatus.value = status
+    resetFilters()
   }
 
   // ===== 返回API =====
   return {
     // 只读状态
-    nodes: readonly(nodes),
-    edges: readonly(edges),
-    selectedElements: readonly(selectedElements),
-    viewport: readonly(viewport),
-    executionStatus: readonly(executionStatus),
+    workflows: readonly(workflows),
     currentWorkflow: readonly(currentWorkflow),
+    isLoading: readonly(isLoading),
+    error: readonly(error),
+    pagination: readonly(pagination),
+    filters: readonly(filters),
 
     // 计算属性
-    selectedNodes,
-    selectedEdges,
-    workflowIsValid,
-    canUndo,
-    canRedo,
-    workflowStats,
+    activeWorkflows,
+    runningWorkflows,
+    errorWorkflows,
+    totalExecutions,
+    averageSuccessRate,
+    workflowsByStatus,
 
     // 方法
-    addNode,
-    addNodes,
-    removeNode,
-    updateNode,
-    updateNodeData,
-    addEdge,
-    addEdges,
-    removeEdge,
-    updateEdge,
-    selectNode,
-    selectEdge,
-    clearSelection,
-    selectAll,
-    updateViewport,
-    undo,
-    redo,
-    loadWorkflow,
-    clearWorkflow,
-    exportWorkflow,
-    setExecutionStatus,
+    fetchWorkflows,
+    fetchWorkflow,
+    createWorkflow,
+    updateWorkflow,
+    deleteWorkflow,
+    executeWorkflow,
+    stopWorkflow,
+    duplicateWorkflow,
+    updateFilters,
+    resetFilters,
+    searchWorkflows,
+    filterByStatus,
+    filterByCreator,
+    sortWorkflows,
+    changePage,
+    changePageSize,
+    getExecutionHistory,
+    clearError,
+    reset
+  }
+}, {
+  persist: {
+    key: 'workflow-management-store',
+    storage: localStorage,
+    paths: ['filters']
   }
 })
